@@ -4,6 +4,10 @@ Fixes the jar filling exploit for water in 7 Days to Die.
 
 Made and tested for game version 3.0
 
+
+<img width="800" height="450" alt="ezgif-5d93d3e5f7e34bbf" src="https://github.com/user-attachments/assets/d2ed8fc5-6cf3-46bf-945d-8a81c4651d51" />
+
+
 ## The problem
 
 In vanilla the game lets you fill an entire stack of empty jars in a single click but only ever charges the water cost of one jar for the whole stack. This means if you are holding a full stack of 80 empty jars and you dip them into any water source you walk away with 80 full jars while the game only removes enough water for a single jar.
@@ -34,15 +38,50 @@ The radius the mod searches for water in also increases slightly as you try to f
 
 The mod comes with a small config file that adjusts the empty jar item itself. It does two things.
 
-First it lowers the delay on the jar filling action from the vanilla value down to half a second. This makes filling jars feel faster and more responsive since the whole point of this mod is to let you comfortably fill large stacks of jars at once, and a long delay before the fill triggers makes that feel sluggish.
+First it lowers the delay on the jar filling action from the vanilla value down to half a second. This makes filling jars feel faster and more responsive since the whole point of this mod is to let you comfortably fill large stacks of jars at once and a long delay before the fill triggers makes that feel sluggish.
 
-Second it makes sure the ReduceWater option is turned on for the jar filling action if it is not already enabled in the base game files. This option controls whether water is actually removed from the world when you fill jars. Without this option enabled the mod would have nothing to work with since there would be no water reduction happening in the first place for it to calculate properly. This part of the config only adds the option if it is missing, so it will not conflict with other mods that may have already changed this value.
+Second it makes sure the ReduceWater option is turned on for the jar filling action if it is not already enabled in the base game files. This option controls whether water is actually removed from the world when you fill jars. Without this option enabled the mod would have nothing to work with since there would be no water reduction happening in the first place for it to calculate properly. This part of the config only adds the option if it is missing so it will not conflict with other mods that may have already changed this value.
+
+```xml
+<append xpath="/items/item[@name='drinkJarEmpty']/property[@class='Action1'][property[@name='Class' and @value='CollectWater'] and not(property[@name='ReduceWater'])]">
+    <property name="ReduceWater" value="true"/>
+</append>
+```
+
+If you have another mod that adds a new item for collecting water and you want that item to work correctly with JarSmartFill you can use the exact same pattern in your own mod's config file. Just replace drinkJarEmpty with the name of your item. The xpath condition already makes sure the property is only added when it is not already present so there is no risk of doubling up if something else already set it.
+
+```xml
+<append xpath="/items/item[@name='yourItemNameHere']/property[@class='Action1'][property[@name='Class' and @value='CollectWater'] and not(property[@name='ReduceWater'])]">
+    <property name="ReduceWater" value="true"/>
+</append>
+```
+
+This is the only XML change needed on the item side. The mod will then handle that item correctly as long as its name is also registered inside the mod itself as described in the adding support for other items section below.
+
+## Adding support for other items
+
+By default this mod only handles the vanilla empty jar item called drinkJarEmpty. If you have another mod that adds a new container for collecting water and you want it to benefit from the same smart filling behavior you need to make sure that item is set up correctly in XML and that its item name is registered in the mod.
+
+For the mod side open the main CS file and find the line that defines EmptyJarName near the top of the JarSmartFill class. By default it looks like this.
+
+```csharp
+internal const string EmptyJarName = "drinkJarEmpty";
+```
+
+The relevant check in the patch that uses this name looks like this.
+
+```csharp
+if (heldClass.Name != JarSmartFill.EmptyJarName)
+    return true;
+```
+
+You could change this to also allow your custom item name alongside the vanilla one. Everything else in the mod will work the same way for any item that passes this check as long as the item is set up correctly in XML with ReduceWater enabled as shown above.
 
 ## Compatibility
 
-This mod only affects the vanilla empty jar item. It does not change or interfere with any other item that might use the same underlying water collecting action. Any other item you might encounter that shares this water collecting behavior will continue to work exactly as it did before, completely unaffected by this mod.
+This mod only affects items that are explicitly handled inside the patch. Anything else that uses the same water collecting action class will continue to work exactly like vanilla and will not be touched in any way.
 
-This mod is built for game version 3.0. It relies on the internal structure of a few vanilla classes related to water collecting, so it may not work correctly on older versions and may need updates if the relevant vanilla code changes in future game versions.
+This mod is built for game version 3.0. It relies on the internal structure of a few vanilla classes related to water collecting so it may not work correctly on older versions and may need updates if the relevant vanilla code changes in future game versions.
 
 ## Installation
 
@@ -50,7 +89,7 @@ Extract the mod folder into the Mods directory of your game installation. This f
 
 ## Notes
 
-If the water reduction option is turned off for the water collecting action in the game files then no water will ever be removed from the world no matter what, regardless of this mod being installed. This matches how vanilla behaves in that same situation and is fully intended. The included XML config already makes sure this option is turned on for the empty jar by default.
+If the water reduction option is turned off for the water collecting action in the game files then no water will ever be removed from the world no matter what regardless of this mod being installed. This matches how vanilla behaves in that same situation and is fully intended. The included XML config already makes sure this option is turned on for the empty jar by default.
 
 For multiplayer servers it is recommended to install this mod on both the server and all connecting clients to make sure everyone experiences the same consistent behavior.
 
