@@ -6,329 +6,345 @@ using UnityEngine;
 /*
  JarSmartFill
 
-Vanilla own fill logic only ever looks at ONE jar worth of capacity -
-whatever the currently held item still needs to be full - and then as
-long as it finds any usable water nearby swaps the held stack
-over to the filled item in one shot all sharing that same single-jar fill amount
-
-Topping off a stack of 80 empty jars from a puddle costs exactly the same water as topping off one
-
-That harmless for a river or lake where the difference is never going to be visible either way
-but a small pond turns into a way to mass-produce full jars for next to nothing
-
-This mod keeps the one click whole stack feel of vanilla
-but makes the water cost for small bodies of water actually scale with how many jars you walking away with
-
  Goal
- - Small bodies of water can be drained, but the whole stack of jars still
-   fills in one go, same as vanilla
+ -----
+ Vanilla fill logic only ever costs one jar worth of water no matter
+ how many empty jars are in the held stack then swaps the whole stack
+ to filled items in one shot Topping off a stack of 80 jars from a
+ puddle costs exactly the same water as topping off one
+ This mod keeps the one click whole stack feel of vanilla but makes
+ the water cost for small bodies of water scale with how many jars the
+ player walks away with
+ Large bodies of water river or lake are not drained jars still fill
+ but world water is left untouched since costing something effectively
+ bottomless is not worth the compute and network overhead
 
- - Large bodies of water (river/lake) are NOT drained - jars still fill,
-   but the world water is left untouched, since computing and
-   networking an exact cost against something effectively bottomless isn't worth the overhead
+ Why a Prefix that mirrors vanilla trigger timing instead of a Postfix
+ ----------------------------------------------------------------------
+ Vanilla fires its fill once per click a click stamps lastUseTime with
+ a real timestamp OnHoldingUpdate waits out IsActionRunning every
+ frame and the instant the wait is over it resets lastUseTime to 0
+ right before doing the actual work That reset is what stops the same
+ click from refiring on the next frame
+ This mod fully replaces that work returning false skips the vanilla
+ body entirely so vanilla's own reset never runs The Prefix performs
+ the same reset itself at the same point vanilla would or the fill
+ would refire every frame instead of once per click
+ The reset only happens once the held item is confirmed to be
+ drinkJarEmpty doing it any earlier would consume the trigger for some
+ other item that happens to share this action class say a modded
+ bucket and leave that item's own fill silently dead on a legit click
+ The two checks at the very top lastUseTime equals 0 and
+ IsActionRunning mirror vanilla's own gate exactly so returning true
+ there is a true no-op vanilla would have bailed at the same point
 
- - Just one simple vanilla mass-probe via
-   CollectWaterUtils.CollectWater, reused for both the big-water test and
-   the actual small-water collection
+ Why one mass probe is reused for the big water test
+ ----------------------------------------------------
+ CollectWaterUtils.CollectWater only fills a WaterPoint list world
+ water is mutated exclusively through NetPackageWaterSet so calling it
+ without sending a package is a pure read The big water probe asks for
+ BigWaterProbeBlocks worth of full block mass within
+ BigWaterProbeRadius If satisfied the body of water is treated as
+ bottomless the whole stack fills and no package is sent matching
+ vanilla's one dip whole stack full behavior exactly
 
- ----------------------------------------------------------------------------
- What the does in order
+ Why jar capacity is read from targetMass instead of a constant
+ ---------------------------------------------------------------
+ Vanilla derives targetMass in ExecuteAction from the item's own
+ MaxMass minus current Meta Reading it back off CollectWaterActionData
+ stays correct on its own if a jar's capacity is ever retuned in XML
+ rather than quietly drifting out of sync with a separately hardcoded
+ guess A WaterValue built from targetMass failing HasMass guards both
+ a zero capacity and the division by jarCapacityMass below
 
-1) Patch ItemActionCollectWater.OnHoldingUpdate 
-Only act when the held item is drinkJarEmpty
+ Important whole jar note
+ -------------------------
+ jarsToFill is collectedMass divided by jarCapacityMass whole jars
+ only A player gets a properly full jar or nothing never one quietly a
+ few percent short because the pond ran dry partway through the stack
+ When the exact mass differs from the first collection a second
+ CollectWater call is made for exactMass so waterPoints line up
+ exactly with the jars actually handed out otherwise the world would
+ lose more water than the jars account for or a jar would be handed
+ out that is not backed by any water actually removed
+ If the pond has less than one jar of water left and cannot fill a
+ whole jar the remainder is drained from the world anyway and the
+ player gets no jar This prevents a tiny remainder from becoming an
+ untouchable block that never depletes The points collected by the
+ first CollectWater call already represent everything found in range
+ since the request exceeded what was available so no second call is
+ needed to drain that remainder
 
-Anything else - say, a modded bucket that happens to reuse this same action class 
-is left completely alone and keeps behaving exactly like vanilla
-since this mod has no opinion about items it doesn recognize
+ Important radius note
+ ----------------------
+ Vanilla never looks past radius 2 because it only ever needs one jar
+ Once cost scales with stack size filling a big stack can need far
+ more water than a small radius realistically contains nearby
+ GetCollectRadius grows the radius by one per JarsPerRadiusStep jars
+ and caps it at MaxCollectRadius so one click on a huge stack cannot
+ trigger an unbounded search MaxCollectRadius matches
+ BigWaterProbeRadius so a body already confirmed small can never yield
+ more than BigWaterProbeBlocks worth of mass through this path
 
-2) Big water check (simple)
+ Important water zeroing note
+ -----------------------------
+ A cell is never zeroed by a manual threshold A WaterValue is built
+ from finalMass and if HasMass is false it is replaced with
+ WaterValue.Empty so empty means exactly what the engine thinks it
+ means
+ If ItemActionCollectWater has ReduceWater false in the XML
+ isReduceWater is false and water is never reduced vanilla behavior
+ and a common reason water does not drain
 
-got = CollectWaterUtils.CollectWater(cc, BigWaterProbeMass, origin, BigWaterProbeRadius, waterPoints)
+ Important hand out note
+ ------------------------
+ Items are handed out through vanilla paths no manual stack splitting
+ Inventory.DecHoldingItem shrinks the empty jar stack in hand The
+ amount placed back into the original slot is capped at the filled
+ item's own Stacknumber first SetItem and AddItemAtSlot will happily
+ write an oversized stack into an empty slot without complaint nothing
+ else enforces that limit
+ The hand stack size is computed before the inventory is touched so a
+ failure here cannot leave empty jars already removed with nothing
+ handed back in return
+ XUiM_PlayerInventory.AddItem stacks and splits by Stacknumber itself
+ and anything that does not fit is dropped via DropItem
+ Without a player UI items are dropped through
+ GameManager.ItemDropServer at the player's own drop position
 
-- BigWaterProbeMass = 64 * WaterValue.Full.GetMass()
-- BigWaterProbeRadius = 10
+ What the mod does in order
+ ---------------------------
+ 1 Patch ItemActionCollectWater.OnHoldingUpdate
+   Harmony Prefix Acts only when the held item is drinkJarEmpty
+   anything else keeps vanilla behavior untouched
+ 2 Big water probe
+   One CollectWater call for BigWaterProbeBlocks of full block mass in
+   BigWaterProbeRadius If satisfied fill the whole stack send nothing
+ 3 Small water collection
+   wantedMass equals emptyCount times jarCapacityMass collect once
+   compute whole jarsToFill recollect for the exact mass when it
+   differs then apply changes strictly the vanilla way
+   NetPackageWaterSet Reset AddChange GameManager.Instance.SetWaterRPC
+   If jarsToFill comes out to zero the water already collected in the
+   attempt is still drained from the world so a sub jar remainder does
+   not become a permanent untouchable puddle no jar is handed out
+ 4 Hand out filled jars
+   DecHoldingItem then AddItemToPreferredToolbeltSlot into the
+   original slotIdx then AddItem for the rest then DropItem for
+   whatever does not fit
 
-If got >= BigWaterProbeMass, the body of water is considered big:
-- water is NOT reduced (no NetPackageWaterSet is sent),
-- the player simply gets the whole stack of jars filled, matching
-vanilla existing one dip, whole stack full behavior exactly
-
- 3) If the body of water is small
-    - Mass per jar is read straight off the action's own targetMass
-      (jarCapacityMass) instead of assuming a fixed fraction of a full
-      water block. That's the same number vanilla itself derives from the
-      item's MaxMass, so it stays correct on its own if a jar's capacity
-      is ever retuned in the XML, rather than quietly drifting out of
-      sync with a separately hardcoded guess.
-
-    - wantedMass = emptyCount * jarCapacityMass
-    - collectedMass = CollectWaterUtils.CollectWater(... wantedMass ...)
-    - jarsToFill = collectedMass / jarCapacityMass (whole jars only - a
-      player gets a properly full jar or nothing, never one that's quietly
-      a few percent short because the pond ran dry partway through the
-      stack)
-    - exactMass = jarsToFill * jarCapacityMass
-    - a second CollectWater call is made for exactMass, so waterPoints
-      line up exactly with the jars actually handed out - otherwise we'd
-      either drain more water than the jars we gave account for, or hand
-      out a jar that isn't backed by any water actually removed from the
-      world
-
-    The collection radius grows with how many jars are being filled
-    (GetCollectRadius, capped at MaxCollectRadius so one click on a huge
-    stack can't trigger an unbounded search). Vanilla never needs to look
-    past a radius of 2 because it only ever needs one jar's worth; once
-    the cost scales with stack size, filling a big stack can need far
-    more water than a small radius could realistically contain nearby.
-
-    If ReduceWater is enabled on ItemActionCollectWater (isReduceWater == true),
-    water changes are applied strictly the vanilla way:
-      NetPackageWaterSet.Reset()
-      NetPackageWaterSet.AddChange(worldPos, WaterValue)
-      GameManager.Instance.SetWaterRPC(pkg)
-
-    To "zero out" water in a cell we do NOT use a manual threshold.
-    Instead we do this:
-      v = new WaterValue(finalMass)
-      if !v.HasMass() => v = WaterValue.Empty
-
- 4) Handing out items (vanilla, no manual stack-splitting)
-    - Inventory.DecHoldingItem(...) shrinks the empty-jar stack in hand
-    - The amount placed back into the original slot is capped at the
-      filled item's own Stacknumber first: SetItem/AddItemAtSlot will
-      happily write an oversized stack into an empty slot without
-      complaint, so nothing else enforces that limit for us
-    - XUiM_PlayerInventory.AddItemToPreferredToolbeltSlot(...) tries to put the filled jars
-      back into the same slotIdx
-    - XUiM_PlayerInventory.AddItem(...) adds the rest (it stacks and splits by Stacknumber itself)
-    - if it does not fit - XUiM_PlayerInventory.DropItem(...)
-
- ----------------------------------------------------------------------------
- Why the Prefix mirrors vanilla's own trigger timing instead of just
- tweaking the result afterwards
-
- - Vanilla only fires its fill logic once per click: a click stamps
-   lastUseTime with a real timestamp, OnHoldingUpdate then waits out
-   IsActionRunning's delay window every frame, and the instant that wait
-   is over it resets lastUseTime back to 0 right before doing the actual
-   work. That reset is what stops the same click from firing again on the
-   next frame - without it, vanilla's fill would refire forever.
- - Since this mod fully replaces that "actual work" (returning false
-   skips vanilla's method body entirely, so vanilla's own reset never
-   runs), the Prefix has to perform that same reset itself, at the same
-   point vanilla would, or our fill would refire every frame instead of
-   once per click.
- - That reset only happens once we've confirmed the held item is really
-   ours (drinkJarEmpty) - doing it any earlier would consume the trigger
-   for some other item that happens to share this action class, even
-   though we never actually acted on its behalf, leaving that item's own
-   fill silently doing nothing on a legitimate click.
- - The two checks at the very top (lastUseTime == 0f, IsActionRunning)
-   mirror vanilla's own gate exactly, so returning true there is a true
-   no-op - vanilla's OnHoldingUpdate would have bailed at the same point
-   anyway.
-
- ----------------------------------------------------------------------------
- Important (a common reason "water does not drain")
- - If ItemActionCollectWater has ReduceWater="false" in the XML,
-   __instance.isReduceWater will be false and water will never be reduced (vanilla behavior).
-
- ----------------------------------------------------------------------------
- Integration points (for future migration)
- ItemActionCollectWater.OnHoldingUpdate
- ItemActionCollectWater.CollectWaterActionData targetPosition targetMass
- CollectWaterUtils.CollectWater
- NetPackageWaterSet.Reset / HasChanges / AddChange(Vector3i, WaterValue)
+ Integration points for future migration
+ -----------------------------------------
+ IModApi.InitMod(Mod)
+ Harmony(string).PatchAll()
+ ItemActionCollectWater.OnHoldingUpdate(ItemActionData)
+ ItemActionCollectWater.IsActionRunning(ItemActionData)
+ ItemActionCollectWater.changeItemToItem (PublicizedFrom private string)
+ ItemActionCollectWater.isReduceWater (PublicizedFrom private bool)
+ ItemActionCollectWater.waterPoints (PublicizedFrom private List<WaterPoint>)
+ ItemActionCollectWater.CollectWaterActionData.targetPosition/targetMass (PublicizedFrom private)
+ ItemActionData.lastUseTime/invData
+ ItemInventoryData.holdingEntity/itemValue/slotIdx
+ CollectWaterUtils.CollectWater(ChunkCluster, int, Vector3i, int, List<WaterPoint>)
+ CollectWaterUtils.WaterPoint.worldPos/massToTake/finalMass
+ WaterValue(int) WaterValue.Full/Empty/HasMass()/GetMass()
+ NetPackageManager.GetPackage<NetPackageWaterSet>()
+ NetPackageWaterSet.Reset()/AddChange(Vector3i, WaterValue)/HasChanges
  GameManager.Instance.SetWaterRPC(NetPackageWaterSet)
- Inventory.DecHoldingItem
- XUiM_PlayerInventory.AddItem / DropItem / AddItemToPreferredToolbeltSlot
- WaterValue.Full / Empty / HasMass / GetMass
+ GameManager.Instance.World.ChunkCache
+ GameManager.ItemDropServer(ItemStack, Vector3, Vector3, int, float, bool)
+ Inventory.holdingCount/DecHoldingItem(int)/SetItem(int, ItemStack)
+ EntityPlayerLocal.GetDropPosition()/entityId
+ LocalPlayerUI.GetUIForPlayer(EntityPlayerLocal) then xui.PlayerInventory
+ XUiM_PlayerInventory.AddItem(ItemStack, bool)/DropItem(ItemStack)/AddItemToPreferredToolbeltSlot(ItemStack, int)
+ ItemClass.GetItem(string, bool)/GetItemName()/Stacknumber
+ ItemValue.Clone()/IsEmpty()/Meta/ItemClass
 */
 
 public class JarSmartFill : IModApi
 {
+    public void InitMod(Mod modInstance)
+    {
+        new Harmony(Config.HarmonyId).PatchAll();
+        Log.Out("[JarSmartFill] Loaded");
+    }
+}
+
+internal static class Config
+{
     internal const string HarmonyId = "diqezit.jarsmartfill";
     internal const string EmptyJarName = "drinkJarEmpty";
 
-    internal static readonly int FullMass = WaterValue.Full.GetMass();
-
-    internal static readonly int BigWaterProbeMass = 64 * FullMass;
+    internal const int BigWaterProbeBlocks = 64;
     internal const int BigWaterProbeRadius = 10;
 
     internal const int BaseCollectRadius = 2;
     internal const int MaxCollectRadius = 10;
     internal const int JarsPerRadiusStep = 20;
 
-    public void InitMod(Mod modInstance)
-    {
-        new Harmony(HarmonyId).PatchAll();
-    }
-
-    internal static int GetCollectRadius(int holdingCount)
-    {
-        if (holdingCount <= 0)
-            return BaseCollectRadius;
-
-        int extraSteps = (holdingCount - 1) / JarsPerRadiusStep;
-        int radius = BaseCollectRadius + extraSteps;
-
-        return Mathf.Clamp(radius, BaseCollectRadius, MaxCollectRadius);
-    }
+    internal const int MinStackLimit = 1;
 }
 
 [HarmonyPatch(typeof(ItemActionCollectWater), nameof(ItemActionCollectWater.OnHoldingUpdate))]
 public static class JarSmartFillPatch_OnHoldingUpdate
 {
+    private static readonly int BigWaterProbeMass =
+        Config.BigWaterProbeBlocks * WaterValue.Full.GetMass();
+
     private static bool Prefix(ItemActionCollectWater __instance, ItemActionData _actionData)
     {
-        if (_actionData == null)
-            return true;
-
-        if (_actionData.lastUseTime == 0f)
+        if (_actionData == null || _actionData.lastUseTime == 0f)
             return true;
 
         if (__instance.IsActionRunning(_actionData))
             return true;
 
-        float oldLastUseTime = _actionData.lastUseTime;
+        float clickTime = _actionData.lastUseTime;
 
         try
         {
-            ItemInventoryData invData = _actionData.invData;
-            if (invData == null)
-                return true;
-
-            EntityPlayerLocal player = invData.holdingEntity as EntityPlayerLocal;
-            if (player == null)
-                return true;
-
-            ItemClass heldClass = invData.itemValue?.ItemClass;
-            if (heldClass == null || heldClass.Name != JarSmartFill.EmptyJarName)
-                return true;
-
-            _actionData.lastUseTime = 0f;
-
-            string filledName = __instance.changeItemToItem;
-            if (string.IsNullOrEmpty(filledName))
-                return false;
-
-            ChunkCluster cc = GameManager.Instance.World?.ChunkCache;
-            if (cc == null)
-                return true;
-
-            var data = (ItemActionCollectWater.CollectWaterActionData)_actionData;
-
-            int emptyCount = player.inventory.holdingCount;
-            if (emptyCount <= 0)
-                return false;
-
-            int jarCapacityMass = data.targetMass;
-            if (!new WaterValue(jarCapacityMass).HasMass())
-                return false;
-
-            List<CollectWaterUtils.WaterPoint> points = __instance.waterPoints;
-            points.Clear();
-
-            try
-            {
-                if (IsBigWater(__instance, cc, data.targetPosition))
-                {
-                    ItemValue filledAll = ItemClass.GetItem(filledName);
-
-                    GiveFilledJars(
-                        player,
-                        invData,
-                        filledAll,
-                        emptyCount,
-                        emptyCount,
-                        invData.itemValue.Meta + jarCapacityMass
-                    );
-
-                    return false;
-                }
-
-                int radius = JarSmartFill.GetCollectRadius(emptyCount);
-                int wantedMass = emptyCount * jarCapacityMass;
-
-                int collectedMass = CollectWaterUtils.CollectWater(
-                    cc,
-                    wantedMass,
-                    data.targetPosition,
-                    radius,
-                    points
-                );
-
-                int jarsToFill = collectedMass / jarCapacityMass;
-
-                if (jarsToFill <= 0)
-                    return false;
-
-                jarsToFill = Mathf.Min(jarsToFill, emptyCount);
-
-                int exactMass = jarsToFill * jarCapacityMass;
-
-                if (exactMass != collectedMass)
-                {
-                    points.Clear();
-
-                    CollectWaterUtils.CollectWater(
-                        cc,
-                        exactMass,
-                        data.targetPosition,
-                        radius,
-                        points
-                    );
-                }
-
-                if (__instance.isReduceWater)
-                    ApplyWaterChangesVanilla(points);
-
-                ItemValue filledValue = ItemClass.GetItem(filledName);
-
-                GiveFilledJars(
-                    player,
-                    invData,
-                    filledValue,
-                    emptyCount,
-                    jarsToFill,
-                    invData.itemValue.Meta + jarCapacityMass
-                );
-
-                return false;
-            }
-            finally
-            {
-                points.Clear();
-            }
+            return RunFill(__instance, _actionData);
         }
         catch (Exception ex)
         {
-            _actionData.lastUseTime = oldLastUseTime;
-            Log.Error($"[JarSmartFill] {ex}");
+            _actionData.lastUseTime = clickTime;
+            Log.Error("[JarSmartFill] " + ex);
             return true;
         }
     }
 
-    private static bool IsBigWater(ItemActionCollectWater action, ChunkCluster cc, Vector3i origin)
+    private static bool RunFill(ItemActionCollectWater action, ItemActionData actionData)
     {
+        ItemInventoryData invData = actionData.invData;
+        if (invData == null)
+            return true;
+
+        EntityPlayerLocal player = invData.holdingEntity as EntityPlayerLocal;
+        if (player == null)
+            return true;
+
+        ItemClass heldClass = invData.itemValue?.ItemClass;
+        if (heldClass == null || heldClass.GetItemName() != Config.EmptyJarName)
+            return true;
+
+        if (!(actionData is ItemActionCollectWater.CollectWaterActionData data))
+            return true;
+
+        actionData.lastUseTime = 0f;
+
+        string filledName = action.changeItemToItem;
+        if (string.IsNullOrEmpty(filledName))
+            return false;
+
+        ChunkCluster cc = GameManager.Instance.World?.ChunkCache;
+        if (cc == null)
+            return false;
+
+        int emptyCount = player.inventory.holdingCount;
+        if (emptyCount <= 0)
+            return false;
+
+        int jarCapacityMass = data.targetMass;
+        if (!new WaterValue(jarCapacityMass).HasMass())
+            return false;
+
+        ItemValue filledValue = ItemClass.GetItem(filledName);
+        if (filledValue.IsEmpty())
+            return false;
+
         List<CollectWaterUtils.WaterPoint> points = action.waterPoints;
         points.Clear();
 
-        int got = CollectWaterUtils.CollectWater(
-            cc,
-            JarSmartFill.BigWaterProbeMass,
-            origin,
-            JarSmartFill.BigWaterProbeRadius,
-            points
-        );
+        try
+        {
+            if (IsBigWater(cc, data.targetPosition, points))
+            {
+                int filledMeta = invData.itemValue.Meta + jarCapacityMass;
+                GiveFilledJars(player, invData, filledValue, filledMeta, emptyCount, emptyCount);
+                return false;
+            }
 
-        points.Clear();
-        return got >= JarSmartFill.BigWaterProbeMass;
+            int jarsToFill = CollectForJars(
+                cc,
+                data.targetPosition,
+                emptyCount,
+                jarCapacityMass,
+                points,
+                invData.itemValue.Meta,
+                out int smallFilledMeta);
+
+            if (action.isReduceWater)
+                ApplyWaterChanges(points);
+
+            if (jarsToFill <= 0)
+                return false;
+
+            GiveFilledJars(player, invData, filledValue, smallFilledMeta, emptyCount, jarsToFill);
+            return false;
+        }
+        finally
+        {
+            points.Clear();
+        }
     }
 
-    private static void ApplyWaterChangesVanilla(List<CollectWaterUtils.WaterPoint> points)
+    private static bool IsBigWater(
+        ChunkCluster cc,
+        Vector3i origin,
+        List<CollectWaterUtils.WaterPoint> points)
     {
-        if (points == null || points.Count == 0)
+        int probedMass = CollectWaterUtils.CollectWater(
+            cc, BigWaterProbeMass, origin, Config.BigWaterProbeRadius, points);
+
+        points.Clear();
+        return probedMass >= BigWaterProbeMass;
+    }
+
+    private static int CollectForJars(
+        ChunkCluster cc,
+        Vector3i origin,
+        int emptyCount,
+        int jarCapacityMass,
+        List<CollectWaterUtils.WaterPoint> points,
+        int baseMeta,
+        out int filledMeta)
+    {
+        int radius = GetCollectRadius(emptyCount);
+        int wantedMass = emptyCount * jarCapacityMass;
+
+        int collectedMass = CollectWaterUtils.CollectWater(cc, wantedMass, origin, radius, points);
+
+        int jarsToFill = Mathf.Min(collectedMass / jarCapacityMass, emptyCount);
+        if (jarsToFill <= 0)
+        {
+            filledMeta = 0;
+            return 0;
+        }
+
+        int exactMass = jarsToFill * jarCapacityMass;
+        if (exactMass != collectedMass)
+        {
+            points.Clear();
+            CollectWaterUtils.CollectWater(cc, exactMass, origin, radius, points);
+        }
+
+        filledMeta = baseMeta + jarCapacityMass;
+        return jarsToFill;
+    }
+
+    private static int GetCollectRadius(int emptyCount)
+    {
+        int extraSteps = (emptyCount - 1) / Config.JarsPerRadiusStep;
+
+        return Mathf.Clamp(
+            Config.BaseCollectRadius + extraSteps,
+            Config.BaseCollectRadius,
+            Config.MaxCollectRadius);
+    }
+
+    private static void ApplyWaterChanges(List<CollectWaterUtils.WaterPoint> points)
+    {
+        if (points.Count == 0)
             return;
 
         NetPackageWaterSet pkg = NetPackageManager.GetPackage<NetPackageWaterSet>();
@@ -351,87 +367,78 @@ public static class JarSmartFillPatch_OnHoldingUpdate
             GameManager.Instance.SetWaterRPC(pkg);
     }
 
-    private static XUiM_PlayerInventory TryGetUiInv(EntityPlayerLocal player)
-    {
-        return LocalPlayerUI.GetUIForPlayer(player)
-            ?.xui
-            ?.PlayerInventory;
-    }
-
-    private static void AddOrDropVanilla(EntityPlayerLocal player, ItemValue itemValue, int count)
-    {
-        if (count <= 0)
-            return;
-
-        XUiM_PlayerInventory inv = TryGetUiInv(player);
-
-        if (inv == null)
-        {
-            ItemStack stack = new ItemStack(itemValue.Clone(), count);
-            Vector3 dropPos = player.position;
-            dropPos.y += 0.5f;
-            GameManager.Instance.ItemDropServer(stack, dropPos, Vector3.zero, player.entityId);
-            return;
-        }
-
-        ItemStack s = new ItemStack(itemValue.Clone(), count);
-
-        inv.AddItem(s, false);
-
-        if (s.count > 0)
-            inv.DropItem(s);
-    }
-
     private static void GiveFilledJars(
         EntityPlayerLocal player,
         ItemInventoryData invData,
         ItemValue filledValue,
+        int filledMeta,
         int emptyCount,
-        int jarsToFill,
-        int filledMeta)
+        int jarsToFill)
     {
-        ItemValue filledWithMeta = filledValue.Clone();
-        filledWithMeta.Meta = filledMeta;
+        ItemValue filled = filledValue.Clone();
+        filled.Meta = filledMeta;
 
-        int emptyLeft = emptyCount - jarsToFill;
-
-        if (emptyLeft > 0)
+        if (jarsToFill < emptyCount)
         {
             player.inventory.DecHoldingItem(jarsToFill);
-            AddOrDropVanilla(player, filledWithMeta, jarsToFill);
+            AddOrDrop(player, filled, jarsToFill);
             return;
         }
 
-        // Everything currently held is being filled
-        //
-        // work out the hand-stack size BEFORE touching the inventory, so a failure here cannot leave the empty
-        // jars already removed with nothing handed back in return
-        //
-        int stackLimit = 1;
-        if (filledWithMeta.ItemClass != null && filledWithMeta.ItemClass.Stacknumber != null)
-            stackLimit = Mathf.Max(1, filledWithMeta.ItemClass.Stacknumber.Value);
-
-        int inHand = Mathf.Min(jarsToFill, stackLimit);
+        int inHand = Mathf.Min(jarsToFill, GetStackLimit(filled));
 
         player.inventory.DecHoldingItem(emptyCount);
 
-        XUiM_PlayerInventory inv = TryGetUiInv(player);
+        XUiM_PlayerInventory uiInventory = GetUiInventory(player);
 
-        if (inv != null)
+        if (uiInventory == null)
         {
-            bool placed = inv.AddItemToPreferredToolbeltSlot(
-                new ItemStack(filledWithMeta.Clone(), inHand),
-                invData.slotIdx
-            );
-
-            if (!placed)
-                AddOrDropVanilla(player, filledWithMeta, inHand);
-
-            AddOrDropVanilla(player, filledWithMeta, jarsToFill - inHand);
+            player.inventory.SetItem(invData.slotIdx, new ItemStack(filled.Clone(), inHand));
+            AddOrDrop(player, filled, jarsToFill - inHand);
             return;
         }
 
-        player.inventory.SetItem(invData.slotIdx, new ItemStack(filledWithMeta.Clone(), inHand));
-        AddOrDropVanilla(player, filledWithMeta, jarsToFill - inHand);
+        bool placed = uiInventory.AddItemToPreferredToolbeltSlot(
+            new ItemStack(filled.Clone(), inHand), invData.slotIdx);
+
+        if (!placed)
+            AddOrDrop(player, filled, inHand);
+
+        AddOrDrop(player, filled, jarsToFill - inHand);
+    }
+
+    private static int GetStackLimit(ItemValue itemValue)
+    {
+        DataItem<int> stackNumber = itemValue.ItemClass?.Stacknumber;
+        if (stackNumber == null)
+            return Config.MinStackLimit;
+
+        return Mathf.Max(Config.MinStackLimit, stackNumber.Value);
+    }
+
+    private static XUiM_PlayerInventory GetUiInventory(EntityPlayerLocal player)
+    {
+        return LocalPlayerUI.GetUIForPlayer(player)?.xui?.PlayerInventory;
+    }
+
+    private static void AddOrDrop(EntityPlayerLocal player, ItemValue filled, int count)
+    {
+        if (count <= 0)
+            return;
+
+        ItemStack stack = new ItemStack(filled.Clone(), count);
+        XUiM_PlayerInventory uiInventory = GetUiInventory(player);
+
+        if (uiInventory == null)
+        {
+            GameManager.Instance.ItemDropServer(
+                stack, player.GetDropPosition(), Vector3.zero, player.entityId);
+            return;
+        }
+
+        uiInventory.AddItem(stack, _playCollectSound: false);
+
+        if (stack.count > 0)
+            uiInventory.DropItem(stack);
     }
 }
